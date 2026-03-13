@@ -154,7 +154,7 @@ For this, we just need to specify three things:
 3. The number of designs we want
 
 ```
-./scripts/run_inference.py 'contigmap.contigs=[150-150]' inference.output_prefix=test_outputs/test inference.num_designs=10
+./scripts/run_inference.py 'contigmap.contigs=[150-150]' inference.output_prefix=outputs/test_outputs/test inference.num_designs=10
 ```
 
 Let's look at this in detail.
@@ -567,6 +567,22 @@ docker run -it --rm --gpus all \
 ```
 
   This starts the `rfdiffusion` container, mounts the models, inputs, and outputs folders, passes all available GPUs, and then calls the `run_inference.py` script with the parameters specified.
+
+1. Workspace docker image
+```bash
+docker build \
+-f docker/RTX-5090.dockerfile \
+-t rfdiffusion_workspace .
+```
+
+2. How to run
+```bash
+docker run --gpus all -it \
+-e PYTHONPATH=/workspace/RFdiffusion \
+-v "$PWD":/workspace/RFdiffusion \
+-w /workspace/RFdiffusion \
+rfdiffusion_workspace
+```
 
 ### Conclusion
 
