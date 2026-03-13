@@ -264,7 +264,7 @@ Hopefully, it's now obvious how you might make a binder with diffusion! Indeed, 
 If chain B is your target, then you could do it like this:
 
 ```
-./scripts/run_inference.py 'contigmap.contigs=[B1-100/0 100-100]' inference.output_prefix=test_outputs/binder_test inference.num_designs=10
+./scripts/run_inference.py 'contigmap.contigs=[B1-100/0 100-100]' inference.output_prefix=outputs/test_outputs/binder_test inference.num_designs=10
 ```
 
 This will generate 100 residue long binders to residues 1-100 of chain B.
