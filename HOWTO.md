@@ -47,3 +47,22 @@ python scripts/run_inference_benchmark.py \
   inference.output_prefix=outputs/bench_xlarge/test \
   inference.num_designs=1
 ```
+## Run a profile
+1. Large
+```bash
+python scripts/run_inference_profile.py \
+  'contigmap.contigs=[200-200]' \
+  inference.output_prefix=outputs/profile_large/test \
+  inference.num_designs=1 \
+  profiler.enabled=true
+```
+
+2. Extra large
+```bash
+python scripts/run_inference_profile.py \
+  'contigmap.contigs=[400-400]' \
+  inference.output_prefix=outputs/profile_xlarge/test \
+  inference.num_designs=1 \
+  profiler.enabled=true
+```
+
