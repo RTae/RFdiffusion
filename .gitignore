@@ -2,6 +2,8 @@
 rfdiffusion.egg-info
 
 models/
+inputs/
+outputs/
 schedules/
 
 examples/ppi_scaffolds
