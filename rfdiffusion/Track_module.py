@@ -1,3 +1,4 @@
+import torch
 import torch.utils.checkpoint as checkpoint
 from rfdiffusion.util_module import *
 from rfdiffusion.Attention_module import *
@@ -240,30 +241,32 @@ class Str2Str(nn.Module):
         if motif_mask is None:
             motif_mask = torch.zeros(L).bool()
         
-        # process msa & pair features
-        node = self.norm_msa(msa[:,0])
-        pair = self.norm_pair(pair)
-        state = self.norm_state(state)
-       
-        node = torch.cat((node, state), dim=-1)
-        node = self.norm_node(self.embed_x(node))
-        pair = self.norm_edge1(self.embed_e1(pair))
-        
-        neighbor = get_seqsep(idx, cyclic_reses)
-        rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1]))
-        pair = torch.cat((pair, rbf_feat, neighbor), dim=-1)
-        pair = self.norm_edge2(self.embed_e2(pair))
-        
-        # define graph
-        if top_k != 0:
-            G, edge_feats = make_topk_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
-        else:
-            G, edge_feats = make_full_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
-        l1_feats = xyz - xyz[:,:,1,:].unsqueeze(2)
-        l1_feats = l1_feats.reshape(B*L, -1, 3)
+        with torch.profiler.record_function("track.se3_prep"):
+            # process msa & pair features
+            node = self.norm_msa(msa[:,0])
+            pair = self.norm_pair(pair)
+            state = self.norm_state(state)
+           
+            node = torch.cat((node, state), dim=-1)
+            node = self.norm_node(self.embed_x(node))
+            pair = self.norm_edge1(self.embed_e1(pair))
+            
+            neighbor = get_seqsep(idx, cyclic_reses)
+            rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1]))
+            pair = torch.cat((pair, rbf_feat, neighbor), dim=-1)
+            pair = self.norm_edge2(self.embed_e2(pair))
+            
+            # define graph
+            if top_k != 0:
+                G, edge_feats = make_topk_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
+            else:
+                G, edge_feats = make_full_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
+            l1_feats = xyz - xyz[:,:,1,:].unsqueeze(2)
+            l1_feats = l1_feats.reshape(B*L, -1, 3)
         
         # apply SE(3) Transformer & update coordinates
-        shift = self.se3(G, node.reshape(B*L, -1, 1), l1_feats, edge_feats)
+        with torch.profiler.record_function("track.se3"):
+            shift = self.se3(G, node.reshape(B*L, -1, 1), l1_feats, edge_feats)
 
         state = shift['0'].reshape(B, L, -1) # (B, L, C)
         
@@ -321,15 +324,21 @@ class IterBlock(nn.Module):
     def forward(self, msa, pair, R_in, T_in, xyz, state, idx, motif_mask, use_checkpoint=False, cyclic_reses=None):
         rbf_feat = rbf(torch.cdist(xyz[:,:,1,:], xyz[:,:,1,:]))
         if use_checkpoint:
-            msa = checkpoint.checkpoint(create_custom_forward(self.msa2msa), msa, pair, rbf_feat, state)
-            pair = checkpoint.checkpoint(create_custom_forward(self.msa2pair), msa, pair)
-            pair = checkpoint.checkpoint(create_custom_forward(self.pair2pair), pair, rbf_feat)
-            R, T, state, alpha = checkpoint.checkpoint(create_custom_forward(self.str2str, top_k=0), msa, pair, R_in, T_in, xyz, state, idx, motif_mask, cyclic_reses)
+            with torch.profiler.record_function("track.msa_update"):
+                msa = checkpoint.checkpoint(create_custom_forward(self.msa2msa), msa, pair, rbf_feat, state)
+            with torch.profiler.record_function("track.pair_update"):
+                pair = checkpoint.checkpoint(create_custom_forward(self.msa2pair), msa, pair)
+                pair = checkpoint.checkpoint(create_custom_forward(self.pair2pair), pair, rbf_feat)
+            with torch.profiler.record_function("track.structure_update"):
+                R, T, state, alpha = checkpoint.checkpoint(create_custom_forward(self.str2str, top_k=0), msa, pair, R_in, T_in, xyz, state, idx, motif_mask, cyclic_reses)
         else:
-            msa = self.msa2msa(msa, pair, rbf_feat, state)
-            pair = self.msa2pair(msa, pair)
-            pair = self.pair2pair(pair, rbf_feat)
-            R, T, state, alpha = self.str2str(msa, pair, R_in, T_in, xyz, state, idx, motif_mask=motif_mask, cyclic_reses=cyclic_reses, top_k=0) 
+            with torch.profiler.record_function("track.msa_update"):
+                msa = self.msa2msa(msa, pair, rbf_feat, state)
+            with torch.profiler.record_function("track.pair_update"):
+                pair = self.msa2pair(msa, pair)
+                pair = self.pair2pair(pair, rbf_feat)
+            with torch.profiler.record_function("track.structure_update"):
+                R, T, state, alpha = self.str2str(msa, pair, R_in, T_in, xyz, state, idx, motif_mask=motif_mask, cyclic_reses=cyclic_reses, top_k=0) 
         
         return msa, pair, R, T, state, alpha
 
@@ -397,81 +406,85 @@ class IterativeSimulator(nn.Module):
            motif_mask: bool tensor, True if motif position that is frozen, else False(L,) 
         """
 
-        B, L = pair.shape[:2]
+        with torch.profiler.record_function("track.simulator.forward"):
+            B, L = pair.shape[:2]
 
-        if motif_mask is None:
-            motif_mask = torch.zeros(L).bool()
+            if motif_mask is None:
+                motif_mask = torch.zeros(L).bool()
 
-        R_in = torch.eye(3, device=xyz_in.device).reshape(1,1,3,3).expand(B, L, -1, -1)
-        T_in = xyz_in[:,:,1].clone()
-        xyz_in = xyz_in - T_in.unsqueeze(-2)
-        
-        state = self.proj_state(state)
-
-        R_s = list()
-        T_s = list()
-        alpha_s = list()
-        for i_m in range(self.n_extra_block):
-            R_in = R_in.detach() # detach rotation (for stability)
-            T_in = T_in.detach()
-            # Get current BB structure
-            xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
-
-            msa_full, pair, R_in, T_in, state, alpha = self.extra_block[i_m](msa_full, 
-                                                                             pair,
-                                                                             R_in, 
-                                                                             T_in, 
-                                                                             xyz, 
-                                                                             state, 
-                                                                             idx,
-                                                                             motif_mask=motif_mask,
-                                                                             use_checkpoint=use_checkpoint,
-                                                                             cyclic_reses=cyclic_reses)
-            R_s.append(R_in)
-            T_s.append(T_in)
-            alpha_s.append(alpha)
-
-        for i_m in range(self.n_main_block):
-            R_in = R_in.detach()
-            T_in = T_in.detach()
-            # Get current BB structure
-            xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
+            R_in = torch.eye(3, device=xyz_in.device).reshape(1,1,3,3).expand(B, L, -1, -1)
+            T_in = xyz_in[:,:,1].clone()
+            xyz_in = xyz_in - T_in.unsqueeze(-2)
             
-            msa, pair, R_in, T_in, state, alpha = self.main_block[i_m](msa, 
-                                                                       pair,
-                                                                       R_in, 
-                                                                       T_in, 
-                                                                       xyz, 
-                                                                       state, 
-                                                                       idx,
-                                                                       motif_mask=motif_mask,
-                                                                       use_checkpoint=use_checkpoint,
-                                                                       cyclic_reses=cyclic_reses)
-            R_s.append(R_in)
-            T_s.append(T_in)
-            alpha_s.append(alpha)
-       
-        state = self.proj_state2(state)
-        for i_m in range(self.n_ref_block):
-            R_in = R_in.detach()
-            T_in = T_in.detach()
-            xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
-            R_in, T_in, state, alpha = self.str_refiner(msa, 
-                                                        pair, 
-                                                        R_in, 
-                                                        T_in, 
-                                                        xyz, 
-                                                        state, 
-                                                        idx, 
-                                                        top_k=64, 
-                                                        motif_mask=motif_mask,
-                                                        cyclic_reses=cyclic_reses)
-            R_s.append(R_in)
-            T_s.append(T_in)
-            alpha_s.append(alpha)
+            state = self.proj_state(state)
 
-        R_s = torch.stack(R_s, dim=0)
-        T_s = torch.stack(T_s, dim=0)
-        alpha_s = torch.stack(alpha_s, dim=0)
+            R_s = list()
+            T_s = list()
+            alpha_s = list()
+            with torch.profiler.record_function("track.extra_blocks"):
+                for i_m in range(self.n_extra_block):
+                    R_in = R_in.detach() # detach rotation (for stability)
+                    T_in = T_in.detach()
+                    # Get current BB structure
+                    xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
 
-        return msa, pair, R_s, T_s, alpha_s, state
+                    msa_full, pair, R_in, T_in, state, alpha = self.extra_block[i_m](msa_full, 
+                                                                                     pair,
+                                                                                     R_in, 
+                                                                                     T_in, 
+                                                                                     xyz, 
+                                                                                     state, 
+                                                                                     idx,
+                                                                                     motif_mask=motif_mask,
+                                                                                     use_checkpoint=use_checkpoint,
+                                                                                     cyclic_reses=cyclic_reses)
+                    R_s.append(R_in)
+                    T_s.append(T_in)
+                    alpha_s.append(alpha)
+
+            with torch.profiler.record_function("track.main_blocks"):
+                for i_m in range(self.n_main_block):
+                    R_in = R_in.detach()
+                    T_in = T_in.detach()
+                    # Get current BB structure
+                    xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
+                    
+                    msa, pair, R_in, T_in, state, alpha = self.main_block[i_m](msa, 
+                                                                               pair,
+                                                                               R_in, 
+                                                                               T_in, 
+                                                                               xyz, 
+                                                                               state, 
+                                                                               idx,
+                                                                               motif_mask=motif_mask,
+                                                                               use_checkpoint=use_checkpoint,
+                                                                               cyclic_reses=cyclic_reses)
+                    R_s.append(R_in)
+                    T_s.append(T_in)
+                    alpha_s.append(alpha)
+           
+            state = self.proj_state2(state)
+            with torch.profiler.record_function("track.refine_blocks"):
+                for i_m in range(self.n_ref_block):
+                    R_in = R_in.detach()
+                    T_in = T_in.detach()
+                    xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
+                    R_in, T_in, state, alpha = self.str_refiner(msa, 
+                                                                pair, 
+                                                                R_in, 
+                                                                T_in, 
+                                                                xyz, 
+                                                                state, 
+                                                                idx, 
+                                                                top_k=64, 
+                                                                motif_mask=motif_mask,
+                                                                cyclic_reses=cyclic_reses)
+                    R_s.append(R_in)
+                    T_s.append(T_in)
+                    alpha_s.append(alpha)
+
+            R_s = torch.stack(R_s, dim=0)
+            T_s = torch.stack(T_s, dim=0)
+            alpha_s = torch.stack(alpha_s, dim=0)
+
+            return msa, pair, R_s, T_s, alpha_s, state
