@@ -593,89 +593,99 @@ class Sampler:
         binderlen = self.binderlen
         target_res = self.ppi_conf.hotspot_res
 
-        ##################
-        ### msa_masked ###
-        ##################
-        msa_masked = torch.zeros((1, 1, L, 48))
-        msa_masked[:, :, :, :22] = seq[None, None]
-        msa_masked[:, :, :, 22:44] = seq[None, None]
-        msa_masked[:, :, 0, 46] = 1.0
-        msa_masked[:, :, -1, 47] = 1.0
+        with torch.profiler.record_function("preprocess.msa_features"):
+            ##################
+            ### msa_masked ###
+            ##################
+            msa_masked = torch.zeros((1, 1, L, 48))
+            msa_masked[:, :, :, :22] = seq[None, None]
+            msa_masked[:, :, :, 22:44] = seq[None, None]
+            msa_masked[:, :, 0, 46] = 1.0
+            msa_masked[:, :, -1, 47] = 1.0
 
-        ################
-        ### msa_full ###
-        ################
-        msa_full = torch.zeros((1, 1, L, 25))
-        msa_full[:, :, :, :22] = seq[None, None]
-        msa_full[:, :, 0, 23] = 1.0
-        msa_full[:, :, -1, 24] = 1.0
+            ################
+            ### msa_full ###
+            ################
+            msa_full = torch.zeros((1, 1, L, 25))
+            msa_full[:, :, :, :22] = seq[None, None]
+            msa_full[:, :, 0, 23] = 1.0
+            msa_full[:, :, -1, 24] = 1.0
 
-        ###########
-        ### t1d ###
-        ###########
+            ###########
+            ### t1d ###
+            ###########
 
-        # Here we need to go from one hot with 22 classes to one hot with 21 classes (last plane is missing token)
-        t1d = torch.zeros((1, 1, L, 21))
+            # Here we need to go from one hot with 22 classes to one hot with 21 classes (last plane is missing token)
+            t1d = torch.zeros((1, 1, L, 21))
 
-        seqt1d = torch.clone(seq)
-        for idx in range(L):
-            if seqt1d[idx, 21] == 1:
-                seqt1d[idx, 20] = 1
-                seqt1d[idx, 21] = 0
+            seqt1d = torch.clone(seq)
+            for idx in range(L):
+                if seqt1d[idx, 21] == 1:
+                    seqt1d[idx, 20] = 1
+                    seqt1d[idx, 21] = 0
 
-        t1d[:, :, :, :21] = seqt1d[None, None, :, :21]
+            t1d[:, :, :, :21] = seqt1d[None, None, :, :21]
 
-        # Set timestep feature to 1 where diffusion mask is True, else 1-t/T
-        timefeature = torch.zeros((L)).float()
-        timefeature[self.mask_str.squeeze()] = 1
-        timefeature[~self.mask_str.squeeze()] = 1 - t / self.T
-        timefeature = timefeature[None, None, ..., None]
+        with torch.profiler.record_function("preprocess.t1d_xyz"):
+            # Set timestep feature to 1 where diffusion mask is True, else 1-t/T
+            timefeature = torch.zeros((L)).float()
+            timefeature[self.mask_str.squeeze()] = 1
+            timefeature[~self.mask_str.squeeze()] = 1 - t / self.T
+            timefeature = timefeature[None, None, ..., None]
 
-        t1d = torch.cat((t1d, timefeature), dim=-1).float()
+            t1d = torch.cat((t1d, timefeature), dim=-1).float()
 
-        #############
-        ### xyz_t ###
-        #############
-        if self.preprocess_conf.sidechain_input:
-            xyz_t[torch.where(seq == 21, True, False), 3:, :] = float("nan")
-        else:
-            xyz_t[~self.mask_str.squeeze(), 3:, :] = float("nan")
+            #############
+            ### xyz_t ###
+            #############
+            if self.preprocess_conf.sidechain_input:
+                xyz_t[torch.where(seq == 21, True, False), 3:, :] = float("nan")
+            else:
+                xyz_t[~self.mask_str.squeeze(), 3:, :] = float("nan")
 
-        xyz_t = xyz_t[None, None]
-        xyz_t = torch.cat((xyz_t, torch.full((1, 1, L, 13, 3), float("nan"))), dim=3)
+            xyz_t = xyz_t[None, None]
+            xyz_t = torch.cat(
+                (xyz_t, torch.full((1, 1, L, 13, 3), float("nan"))), dim=3
+            )
 
-        ###########
-        ### t2d ###
-        ###########
-        t2d = xyz_to_t2d(xyz_t)
+        with torch.profiler.record_function("preprocess.t2d_torsion"):
+            ###########
+            ### t2d ###
+            ###########
+            t2d = xyz_to_t2d(xyz_t)
 
-        ###########
-        ### idx ###
-        ###########
-        idx = torch.tensor(self.contig_map.rf)[None]
+            ###########
+            ### idx ###
+            ###########
+            idx = torch.tensor(self.contig_map.rf)[None]
 
-        ###############
-        ### alpha_t ###
-        ###############
-        seq_tmp = t1d[..., :-1].argmax(dim=-1).reshape(-1, L)
-        alpha, _, alpha_mask, _ = util.get_torsions(
-            xyz_t.reshape(-1, L, 27, 3), seq_tmp, TOR_INDICES, TOR_CAN_FLIP, REF_ANGLES
-        )
-        alpha_mask = torch.logical_and(alpha_mask, ~torch.isnan(alpha[..., 0]))
-        alpha[torch.isnan(alpha)] = 0.0
-        alpha = alpha.reshape(1, -1, L, 10, 2)
-        alpha_mask = alpha_mask.reshape(1, -1, L, 10, 1)
-        alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(1, -1, L, 30)
+            ###############
+            ### alpha_t ###
+            ###############
+            seq_tmp = t1d[..., :-1].argmax(dim=-1).reshape(-1, L)
+            alpha, _, alpha_mask, _ = util.get_torsions(
+                xyz_t.reshape(-1, L, 27, 3),
+                seq_tmp,
+                TOR_INDICES,
+                TOR_CAN_FLIP,
+                REF_ANGLES,
+            )
+            alpha_mask = torch.logical_and(alpha_mask, ~torch.isnan(alpha[..., 0]))
+            alpha[torch.isnan(alpha)] = 0.0
+            alpha = alpha.reshape(1, -1, L, 10, 2)
+            alpha_mask = alpha_mask.reshape(1, -1, L, 10, 1)
+            alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(1, -1, L, 30)
 
-        # put tensors on device
-        msa_masked = msa_masked.to(self.device)
-        msa_full = msa_full.to(self.device)
-        seq = seq.to(self.device)
-        xyz_t = xyz_t.to(self.device)
-        idx = idx.to(self.device)
-        t1d = t1d.to(self.device)
-        t2d = t2d.to(self.device)
-        alpha_t = alpha_t.to(self.device)
+        with torch.profiler.record_function("preprocess.to_device"):
+            # put tensors on device
+            msa_masked = msa_masked.to(self.device)
+            msa_full = msa_full.to(self.device)
+            seq = seq.to(self.device)
+            xyz_t = xyz_t.to(self.device)
+            idx = idx.to(self.device)
+            t1d = t1d.to(self.device)
+            t2d = t2d.to(self.device)
+            alpha_t = alpha_t.to(self.device)
 
         ######################
         ### added_features ###
@@ -734,41 +744,47 @@ class Sampler:
             tors_t_1: (L, ?) The updated torsion angles of the next  step.
             plddt: (L, 1) Predicted lDDT of x0.
         """
-        msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = (
-            self._preprocess(seq_init, x_t, t)
-        )
+        with torch.profiler.record_function("sample_step.preprocess"):
+            msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = (
+                self._preprocess(seq_init, x_t, t)
+            )
 
         N, L = msa_masked.shape[:2]
 
         if self.symmetry is not None:
-            idx_pdb, self.chain_idx = self.symmetry.res_idx_procesing(res_idx=idx_pdb)
+            with torch.profiler.record_function("sample_step.symmetry_idx_process"):
+                idx_pdb, self.chain_idx = self.symmetry.res_idx_procesing(
+                    res_idx=idx_pdb
+                )
 
         msa_prev = None
         pair_prev = None
         state_prev = None
 
         with torch.no_grad():
-            msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
-                msa_masked,
-                msa_full,
-                seq_in,
-                xt_in,
-                idx_pdb,
-                t1d=t1d,
-                t2d=t2d,
-                xyz_t=xyz_t,
-                alpha_t=alpha_t,
-                msa_prev=msa_prev,
-                pair_prev=pair_prev,
-                state_prev=state_prev,
-                t=torch.tensor(t),
-                return_infer=True,
-                motif_mask=self.diffusion_mask.squeeze().to(self.device),
-            )
+            with torch.profiler.record_function("sample_step.model_forward"):
+                msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
+                    msa_masked,
+                    msa_full,
+                    seq_in,
+                    xt_in,
+                    idx_pdb,
+                    t1d=t1d,
+                    t2d=t2d,
+                    xyz_t=xyz_t,
+                    alpha_t=alpha_t,
+                    msa_prev=msa_prev,
+                    pair_prev=pair_prev,
+                    state_prev=state_prev,
+                    t=torch.tensor(t),
+                    return_infer=True,
+                    motif_mask=self.diffusion_mask.squeeze().to(self.device),
+                )
 
         # prediction of X0
-        _, px0 = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
-        px0 = px0.squeeze()[:, :14]
+        with torch.profiler.record_function("sample_step.allatom"):
+            _, px0 = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
+            px0 = px0.squeeze()[:, :14]
 
         #####################
         ### Get next pose ###
@@ -776,20 +792,23 @@ class Sampler:
 
         if t > final_step:
             seq_t_1 = nn.one_hot(seq_init, num_classes=22).to(self.device)
-            x_t_1, px0 = self.denoiser.get_next_pose(
-                xt=x_t,
-                px0=px0,
-                t=t,
-                diffusion_mask=self.mask_str.squeeze(),
-                align_motif=self.inf_conf.align_motif,
-            )
+            with torch.profiler.record_function("sample_step.denoiser_next_pose"):
+                x_t_1, px0 = self.denoiser.get_next_pose(
+                    xt=x_t,
+                    px0=px0,
+                    t=t,
+                    diffusion_mask=self.mask_str.squeeze(),
+                    align_motif=self.inf_conf.align_motif,
+                )
         else:
-            x_t_1 = torch.clone(px0).to(x_t.device)
-            seq_t_1 = torch.clone(seq_init)
-            px0 = px0.to(x_t.device)
+            with torch.profiler.record_function("sample_step.finalize_last_step"):
+                x_t_1 = torch.clone(px0).to(x_t.device)
+                seq_t_1 = torch.clone(seq_init)
+                px0 = px0.to(x_t.device)
 
         if self.symmetry is not None:
-            x_t_1, seq_t_1 = self.symmetry.apply_symmetry(x_t_1, seq_t_1)
+            with torch.profiler.record_function("sample_step.apply_symmetry"):
+                x_t_1, seq_t_1 = self.symmetry.apply_symmetry(x_t_1, seq_t_1)
 
         return px0, x_t_1, seq_t_1, plddt
 
@@ -815,9 +834,10 @@ class SelfConditioning(Sampler):
             plddt: (L, 1) Predicted lDDT of x0.
         """
 
-        msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = (
-            self._preprocess(seq_init, x_t, t)
-        )
+        with torch.profiler.record_function("sample_step.preprocess"):
+            msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = (
+                self._preprocess(seq_init, x_t, t)
+            )
         B, N, L = xyz_t.shape[:3]
 
         ##################################
@@ -836,30 +856,34 @@ class SelfConditioning(Sampler):
         t2d[..., :44] = t2d_44
 
         if self.symmetry is not None:
-            idx_pdb, self.chain_idx = self.symmetry.res_idx_procesing(res_idx=idx_pdb)
+            with torch.profiler.record_function("sample_step.symmetry_idx_process"):
+                idx_pdb, self.chain_idx = self.symmetry.res_idx_procesing(
+                    res_idx=idx_pdb
+                )
 
         ####################
         ### Forward Pass ###
         ####################
         with torch.no_grad():
-            msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
-                msa_masked,
-                msa_full,
-                seq_in,
-                xt_in,
-                idx_pdb,
-                t1d=t1d,
-                t2d=t2d,
-                xyz_t=xyz_t,
-                alpha_t=alpha_t,
-                msa_prev=None,
-                pair_prev=None,
-                state_prev=None,
-                t=torch.tensor(t),
-                return_infer=True,
-                motif_mask=self.diffusion_mask.squeeze().to(self.device),
-                cyclic_reses=self.cyclic_reses,
-            )
+            with torch.profiler.record_function("sample_step.model_forward"):
+                msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
+                    msa_masked,
+                    msa_full,
+                    seq_in,
+                    xt_in,
+                    idx_pdb,
+                    t1d=t1d,
+                    t2d=t2d,
+                    xyz_t=xyz_t,
+                    alpha_t=alpha_t,
+                    msa_prev=None,
+                    pair_prev=None,
+                    state_prev=None,
+                    t=torch.tensor(t),
+                    return_infer=True,
+                    motif_mask=self.diffusion_mask.squeeze().to(self.device),
+                    cyclic_reses=self.cyclic_reses,
+                )
 
             if self.symmetry is not None and self.inf_conf.symmetric_self_cond:
                 px0 = self.symmetrise_prev_pred(px0=px0, seq_in=seq_in, alpha=alpha)[
@@ -869,8 +893,9 @@ class SelfConditioning(Sampler):
         self.prev_pred = torch.clone(px0)
 
         # prediction of X0
-        _, px0 = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
-        px0 = px0.squeeze()[:, :14]
+        with torch.profiler.record_function("sample_step.allatom"):
+            _, px0 = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
+            px0 = px0.squeeze()[:, :14]
 
         ###########################
         ### Generate Next Input ###
@@ -878,27 +903,30 @@ class SelfConditioning(Sampler):
 
         seq_t_1 = torch.clone(seq_init)
         if t > final_step:
-            x_t_1, px0 = self.denoiser.get_next_pose(
-                xt=x_t,
-                px0=px0,
-                t=t,
-                diffusion_mask=self.mask_str.squeeze(),
-                align_motif=self.inf_conf.align_motif,
-                include_motif_sidechains=self.preprocess_conf.motif_sidechain_input,
-            )
+            with torch.profiler.record_function("sample_step.denoiser_next_pose"):
+                x_t_1, px0 = self.denoiser.get_next_pose(
+                    xt=x_t,
+                    px0=px0,
+                    t=t,
+                    diffusion_mask=self.mask_str.squeeze(),
+                    align_motif=self.inf_conf.align_motif,
+                    include_motif_sidechains=self.preprocess_conf.motif_sidechain_input,
+                )
             self._log.info(
                 f"Timestep {t}, input to next step: { seq2chars(torch.argmax(seq_t_1, dim=-1).tolist())}"
             )
         else:
-            x_t_1 = torch.clone(px0).to(x_t.device)
-            px0 = px0.to(x_t.device)
+            with torch.profiler.record_function("sample_step.finalize_last_step"):
+                x_t_1 = torch.clone(px0).to(x_t.device)
+                px0 = px0.to(x_t.device)
 
         ######################
         ### Apply symmetry ###
         ######################
 
         if self.symmetry is not None:
-            x_t_1, seq_t_1 = self.symmetry.apply_symmetry(x_t_1, seq_t_1)
+            with torch.profiler.record_function("sample_step.apply_symmetry"):
+                x_t_1, seq_t_1 = self.symmetry.apply_symmetry(x_t_1, seq_t_1)
 
         return px0, x_t_1, seq_t_1, plddt
 
