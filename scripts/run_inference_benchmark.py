@@ -1,26 +1,3 @@
-#!/usr/bin/env python
-"""
-Benchmarking version of RFdiffusion inference.
-
-Purpose:
-- Keep original run_inference.py untouched
-- Add Day-1 profiling:
-  - total runtime per design
-  - per-step timing
-  - peak GPU memory
-  - CSV and JSON outputs
-
-Example:
-python scripts/run_inference_benchmark.py \
-  'contigmap.contigs=[150-150]' \
-  inference.output_prefix=test_outputs_bench/test \
-  inference.num_designs=3
-
-Notes:
-- This follows the structure of the upstream RFdiffusion run_inference.py
-- It adds logging only; no model logic changes
-"""
-
 import csv
 import glob
 import json

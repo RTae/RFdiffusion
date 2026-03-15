@@ -1,32 +1,3 @@
-#!/usr/bin/env python
-"""
-Profiling version of RFdiffusion inference.
-
-Purpose:
-- Keep original run_inference.py untouched
-- Profile one inference run with torch.profiler
-- Focus on steady-state denoising steps
-- Export:
-  - profiler tables
-  - chrome trace
-  - per-step timing CSV
-  - summary JSON
-
-Example:
-python scripts/run_inference_profile.py \
-  'contigmap.contigs=[150-150]' \
-  inference.output_prefix=profile_outputs/test \
-  inference.num_designs=1
-
-Optional:
-python scripts/run_inference_profile.py \
-  'contigmap.contigs=[150-150]' \
-  inference.output_prefix=profile_outputs/test \
-  inference.num_designs=1 \
-  profiler.start_step=1 \
-  profiler.end_step=5
-"""
-
 import csv
 import glob
 import json
@@ -240,12 +211,13 @@ def main(conf: HydraConfig) -> None:
 
                 if profiled:
                     with torch.profiler.record_function(f"rfdiffusion_step_{step_idx}_t_{t}"):
-                        px0, x_t, seq_t, plddt = sampler.sample_step(
-                            t=t,
-                            x_t=x_t,
-                            seq_init=seq_t,
-                            final_step=sampler.inf_conf.final_step,
-                        )
+                        with torch.profiler.record_function("sampler.sample_step"):
+                            px0, x_t, seq_t, plddt = sampler.sample_step(
+                                t=t,
+                                x_t=x_t,
+                                seq_init=seq_t,
+                                final_step=sampler.inf_conf.final_step,
+                            )
                 else:
                     px0, x_t, seq_t, plddt = sampler.sample_step(
                         t=t,
