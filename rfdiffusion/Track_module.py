@@ -250,50 +250,53 @@ class Str2Str(nn.Module):
             node = torch.cat((node, state), dim=-1)
             node = self.norm_node(self.embed_x(node))
             pair = self.norm_edge1(self.embed_e1(pair))
-            
-            neighbor = get_seqsep(idx, cyclic_reses)
-            rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1]))
-            pair = torch.cat((pair, rbf_feat, neighbor), dim=-1)
-            pair = self.norm_edge2(self.embed_e2(pair))
-            
-            # define graph
-            if top_k != 0:
-                G, edge_feats = make_topk_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
-            else:
-                G, edge_feats = make_full_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
-            l1_feats = xyz - xyz[:,:,1,:].unsqueeze(2)
-            l1_feats = l1_feats.reshape(B*L, -1, 3)
+
+            with torch.profiler.record_function("track.basis_or_edge_features"):
+                neighbor = get_seqsep(idx, cyclic_reses)
+                rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1]))
+                pair = torch.cat((pair, rbf_feat, neighbor), dim=-1)
+                pair = self.norm_edge2(self.embed_e2(pair))
+
+            with torch.profiler.record_function("track.graph_build"):
+                # define graph
+                if top_k != 0:
+                    G, edge_feats = make_topk_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
+                else:
+                    G, edge_feats = make_full_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
+                l1_feats = xyz - xyz[:,:,1,:].unsqueeze(2)
+                l1_feats = l1_feats.reshape(B*L, -1, 3)
         
         # apply SE(3) Transformer & update coordinates
         with torch.profiler.record_function("track.se3"):
             shift = self.se3(G, node.reshape(B*L, -1, 1), l1_feats, edge_feats)
 
-        state = shift['0'].reshape(B, L, -1) # (B, L, C)
-        
-        offset = shift['1'].reshape(B, L, 2, 3)
-        offset[:,motif_mask,...] = 0            # NOTE: motif mask is all zeros if not freeezing the motif 
+        with torch.profiler.record_function("track.se3_post"):
+            state = shift['0'].reshape(B, L, -1) # (B, L, C)
+            offset = shift['1'].reshape(B, L, 2, 3)
+            offset[:,motif_mask,...] = 0            # NOTE: motif mask is all zeros if not freeezing the motif 
 
-        delTi = offset[:,:,0,:] / 10.0 # translation
-        R = offset[:,:,1,:] / 100.0 # rotation
-        
-        Qnorm = torch.sqrt( 1 + torch.sum(R*R, dim=-1) )
-        qA, qB, qC, qD = 1/Qnorm, R[:,:,0]/Qnorm, R[:,:,1]/Qnorm, R[:,:,2]/Qnorm
-
-        delRi = torch.zeros((B,L,3,3), device=xyz.device)
-        delRi[:,:,0,0] = qA*qA+qB*qB-qC*qC-qD*qD
-        delRi[:,:,0,1] = 2*qB*qC - 2*qA*qD
-        delRi[:,:,0,2] = 2*qB*qD + 2*qA*qC
-        delRi[:,:,1,0] = 2*qB*qC + 2*qA*qD
-        delRi[:,:,1,1] = qA*qA-qB*qB+qC*qC-qD*qD
-        delRi[:,:,1,2] = 2*qC*qD - 2*qA*qB
-        delRi[:,:,2,0] = 2*qB*qD - 2*qA*qC
-        delRi[:,:,2,1] = 2*qC*qD + 2*qA*qB
-        delRi[:,:,2,2] = qA*qA-qB*qB-qC*qC+qD*qD
-
-        Ri = einsum('bnij,bnjk->bnik', delRi, R_in)
-        Ti = delTi + T_in #einsum('bnij,bnj->bni', delRi, T_in) + delTi
+        with torch.profiler.record_function("track.coord_update"):
+            delTi = offset[:,:,0,:] / 10.0 # translation
+            R = offset[:,:,1,:] / 100.0 # rotation
             
-        alpha = self.sc_predictor(msa[:,0], state)
+            Qnorm = torch.sqrt( 1 + torch.sum(R*R, dim=-1) )
+            qA, qB, qC, qD = 1/Qnorm, R[:,:,0]/Qnorm, R[:,:,1]/Qnorm, R[:,:,2]/Qnorm
+
+            delRi = torch.zeros((B,L,3,3), device=xyz.device)
+            delRi[:,:,0,0] = qA*qA+qB*qB-qC*qC-qD*qD
+            delRi[:,:,0,1] = 2*qB*qC - 2*qA*qD
+            delRi[:,:,0,2] = 2*qB*qD + 2*qA*qC
+            delRi[:,:,1,0] = 2*qB*qC + 2*qA*qD
+            delRi[:,:,1,1] = qA*qA-qB*qB+qC*qC-qD*qD
+            delRi[:,:,1,2] = 2*qC*qD - 2*qA*qB
+            delRi[:,:,2,0] = 2*qB*qD - 2*qA*qC
+            delRi[:,:,2,1] = 2*qC*qD + 2*qA*qB
+            delRi[:,:,2,2] = qA*qA-qB*qB-qC*qC+qD*qD
+
+            Ri = einsum('bnij,bnjk->bnik', delRi, R_in)
+            Ti = delTi + T_in #einsum('bnij,bnj->bni', delRi, T_in) + delTi
+            
+            alpha = self.sc_predictor(msa[:,0], state)
         return Ri, Ti, state, alpha
 
 class IterBlock(nn.Module):
