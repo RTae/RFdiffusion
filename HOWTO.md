@@ -2,14 +2,16 @@
 
 ## Start env
 
-1. Workspace docker image
+Workspace docker image
+
 ```bash
 docker build \
 -f docker/RTX-5090.dockerfile \
 -t rfdiffusion_workspace .
 ```
 
-2. How to run
+How to run
+
 ```bash
 docker run --gpus all -it \
 -e PYTHONPATH=/workspace/RFdiffusion \
@@ -19,36 +21,47 @@ rfdiffusion_workspace
 ```
 
 ## Run a benchmark
-1. Small
+
+Small
+
 ```bash
 python scripts/run_inference_benchmark.py \
   'contigmap.contigs=[50-50]' \
   inference.output_prefix=outputs/bench_small/test \
   inference.num_designs=1
 ```
-2. Medium
+
+Medium
+
 ```bash
 python scripts/run_inference_benchmark.py \
   'contigmap.contigs=[100-100]' \
   inference.output_prefix=outputs/bench_medium/test \
   inference.num_designs=1
 ```
-3. Large
+
+Large
+
 ```bash
 python scripts/run_inference_benchmark.py \
   'contigmap.contigs=[200-200]' \
   inference.output_prefix=outputs/bench_large/test \
   inference.num_designs=1
 ```
-4. Extra large
+
+Extra large
+
 ```bash
 python scripts/run_inference_benchmark.py \
   'contigmap.contigs=[400-400]' \
   inference.output_prefix=outputs/bench_xlarge/test \
   inference.num_designs=1
 ```
+
 ## Run a profile
-1. Large
+
+Large
+
 ```bash
 python scripts/run_inference_profile.py \
   'contigmap.contigs=[200-200]' \
@@ -57,7 +70,8 @@ python scripts/run_inference_profile.py \
   profiler.enabled=true
 ```
 
-2. Extra large
+Extra large
+
 ```bash
 python scripts/run_inference_profile.py \
   'contigmap.contigs=[400-400]' \
@@ -65,4 +79,3 @@ python scripts/run_inference_profile.py \
   inference.num_designs=1 \
   profiler.enabled=true
 ```
-

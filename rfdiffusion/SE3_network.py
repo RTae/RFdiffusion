@@ -75,9 +75,15 @@ class SE3TransformerWrapper(nn.Module):
         nn.init.zeros_(self.se3.graph_modules[-1].to_kernel_self['1'])
 
     def forward(self, G, type_0_features, type_1_features=None, edge_features=None):
-        if self.l1_in > 0:
-            node_features = {'0': type_0_features, '1': type_1_features}
-        else:
-            node_features = {'0': type_0_features}
-        edge_features = {'0': edge_features}
-        return self.se3(G, node_features, edge_features)
+        with torch.profiler.record_function("se3_wrapper.forward"):
+            with torch.profiler.record_function("se3_wrapper.input_prep"):
+                if self.l1_in > 0:
+                    node_features = {'0': type_0_features, '1': type_1_features}
+                else:
+                    node_features = {'0': type_0_features}
+            with torch.profiler.record_function("se3_wrapper.edge_features"):
+                edge_features = {'0': edge_features}
+            with torch.profiler.record_function("se3_wrapper.transformer"):
+                se3_out = self.se3(G, node_features, edge_features)
+            with torch.profiler.record_function("se3_wrapper.output_unpack"):
+                return se3_out
