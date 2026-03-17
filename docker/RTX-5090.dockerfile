@@ -99,29 +99,28 @@ RUN git clone --recursive https://github.com/dmlc/dgl.git && \
 #-----------------------------------------------------------------------
 # 8. Install Other Python Dependencies
 #-----------------------------------------------------------------------
-# Install remaining packages. Pip will choose versions of torchdata and e3nn
-# compatible with the installed PyTorch nightly build.
+# Install remaining RFdiffusion packages.
 RUN pip install --no-cache-dir \
     hydra-core==1.3.2 pyrsistent>=0.19.3 pandas pydantic>=2.0 \
-    wandb pynvml torchdata e3nn decorator gitpython
+    torchdata gitpython
 RUN pip install --no-cache-dir git+https://github.com/NVIDIA/dllogger.git
 
 #-----------------------------------------------------------------------
-# 9. Preinstall SE3Transformer dependency only
+# 9. Preinstall SE3Transformer Python dependencies only (no source copy)
 #-----------------------------------------------------------------------
-# Copy just the SE3Transformer dependency so the base image has all
-# heavy dependencies prebuilt. The RFdiffusion source itself will be
-# mounted at runtime to allow live code edits without rebuilding.
-WORKDIR /tmp/SE3Transformer
-COPY env/SE3Transformer/ ./
-RUN pip install -r requirements.txt && \
-    python setup.py install
+# Keep runtime dependencies available in the image, but do not install
+# the SE3Transformer package itself here. It will be installed in editable
+# mode from the bind-mounted source at container startup.
+RUN pip install --no-cache-dir \
+    e3nn==0.3.3 \
+    wandb==0.12.0 \
+    pynvml==11.0.0 \
+    decorator==5.1.0
 
 #-----------------------------------------------------------------------
-# 10. Apply e3nn Hotfix (AFTER SE3Transformer install)
+# 10. Apply e3nn Hotfix
 #-----------------------------------------------------------------------
-# The installation of SE3Transformer (using e3nn==0.3.3) overwrites the
-# newer e3nn, so we apply the patch *after* it's been potentially downgraded.
+# e3nn==0.3.3 needs this patch for newer PyTorch versions.
 # This fixes the 'weights_only=False' error with newer PyTorch versions.
 RUN sed -i "s/torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))/torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'), weights_only=False)/" /opt/conda/envs/rfdiffusion/lib/python3.11/site-packages/e3nn/o3/_wigner.py
 
@@ -172,6 +171,7 @@ ENV CONDA_DIR=/opt/conda
 COPY --from=builder /opt/conda /opt/conda
 ENV PATH=$CONDA_DIR/bin:$PATH
 ENV RFDIFFUSION_SRC=/workspace/RFdiffusion
+ENV SE3TRANSFORMER_SRC=/workspace/RFdiffusion/env/SE3Transformer
 ENV PYTHONPATH=/workspace/RFdiffusion
 
 # Default working directory where you can bind-mount your source, e.g.:
