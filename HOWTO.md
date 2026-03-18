@@ -17,6 +17,8 @@ docker run --gpus all -it \
 --cap-add=SYS_ADMIN \
 --cap-add=SYS_PTRACE \
 --security-opt seccomp=unconfined \
+--ipc=host \
+-e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
 -e PYTHONPATH=/workspace/RFdiffusion \
 -v "$PWD":/workspace/RFdiffusion \
 -w /workspace/RFdiffusion \
@@ -63,6 +65,13 @@ python scripts/run_inference_benchmark.py \
 
 ## Run a profile
 
+Check Nsight tools are available
+
+```bash
+nsys --version
+ncu --version
+```
+
 Large
 
 ```bash
@@ -81,7 +90,19 @@ nsys profile --trace=cuda,nvtx,osrt python scripts/run_inference_profile.py \
   inference.num_designs=1 \
   profiler.enabled=false \
   profiler.nvtx_enabled=true \
-  profiler.max_steps=12
+  profiler.max_steps=10
+```
+
+ncu profile
+```bash
+ncu --set full --target-processes all --force-overwrite --export outputs/profile_large/test_ncu \
+python scripts/run_inference_profile.py \
+  'contigmap.contigs=[200-200]' \
+  inference.output_prefix=outputs/profile_large/test \
+  inference.num_designs=1 \
+  profiler.enabled=false \
+  profiler.nvtx_enabled=true \
+  profiler.max_steps=10
 ```
 
 Extra large

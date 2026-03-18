@@ -3,6 +3,7 @@ import torch.utils.checkpoint as checkpoint
 from rfdiffusion.util_module import *
 from rfdiffusion.Attention_module import *
 from rfdiffusion.SE3_network import SE3TransformerWrapper
+from rfdiffusion.profiling import nvtx_range
 
 # Components for three-track blocks
 # 1. MSA -> MSA update (biased attention. bias from pair & structure)
@@ -241,7 +242,7 @@ class Str2Str(nn.Module):
         if motif_mask is None:
             motif_mask = torch.zeros(L).bool()
         
-        with torch.profiler.record_function("track.se3_prep"):
+        with torch.profiler.record_function("track.se3_prep"), nvtx_range("track.se3_prep"):
             # process msa & pair features
             node = self.norm_msa(msa[:,0])
             pair = self.norm_pair(pair)
@@ -251,13 +252,13 @@ class Str2Str(nn.Module):
             node = self.norm_node(self.embed_x(node))
             pair = self.norm_edge1(self.embed_e1(pair))
 
-            with torch.profiler.record_function("track.basis_or_edge_features"):
+            with torch.profiler.record_function("track.basis_or_edge_features"), nvtx_range("track.basis_or_edge_features"):
                 neighbor = get_seqsep(idx, cyclic_reses)
                 rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1]))
                 pair = torch.cat((pair, rbf_feat, neighbor), dim=-1)
                 pair = self.norm_edge2(self.embed_e2(pair))
 
-            with torch.profiler.record_function("track.graph_build"):
+            with torch.profiler.record_function("track.graph_build"), nvtx_range("track.graph_build"):
                 # define graph
                 if top_k != 0:
                     G, edge_feats = make_topk_graph(xyz[:,:,1,:], pair, idx, top_k=top_k)
@@ -267,15 +268,15 @@ class Str2Str(nn.Module):
                 l1_feats = l1_feats.reshape(B*L, -1, 3)
         
         # apply SE(3) Transformer & update coordinates
-        with torch.profiler.record_function("track.se3"):
+        with torch.profiler.record_function("track.se3"), nvtx_range("track.se3"):
             shift = self.se3(G, node.reshape(B*L, -1, 1), l1_feats, edge_feats)
 
-        with torch.profiler.record_function("track.se3_post"):
+        with torch.profiler.record_function("track.se3_post"), nvtx_range("track.se3_post"):
             state = shift['0'].reshape(B, L, -1) # (B, L, C)
             offset = shift['1'].reshape(B, L, 2, 3)
             offset[:,motif_mask,...] = 0            # NOTE: motif mask is all zeros if not freeezing the motif 
 
-        with torch.profiler.record_function("track.coord_update"):
+        with torch.profiler.record_function("track.coord_update"), nvtx_range("track.coord_update"):
             delTi = offset[:,:,0,:] / 10.0 # translation
             R = offset[:,:,1,:] / 100.0 # rotation
             
@@ -327,20 +328,20 @@ class IterBlock(nn.Module):
     def forward(self, msa, pair, R_in, T_in, xyz, state, idx, motif_mask, use_checkpoint=False, cyclic_reses=None):
         rbf_feat = rbf(torch.cdist(xyz[:,:,1,:], xyz[:,:,1,:]))
         if use_checkpoint:
-            with torch.profiler.record_function("track.msa_update"):
+            with torch.profiler.record_function("track.msa_update"), nvtx_range("track.msa_update"):
                 msa = checkpoint.checkpoint(create_custom_forward(self.msa2msa), msa, pair, rbf_feat, state)
-            with torch.profiler.record_function("track.pair_update"):
+            with torch.profiler.record_function("track.pair_update"), nvtx_range("track.pair_update"):
                 pair = checkpoint.checkpoint(create_custom_forward(self.msa2pair), msa, pair)
                 pair = checkpoint.checkpoint(create_custom_forward(self.pair2pair), pair, rbf_feat)
-            with torch.profiler.record_function("track.structure_update"):
+            with torch.profiler.record_function("track.structure_update"), nvtx_range("track.structure_update"):
                 R, T, state, alpha = checkpoint.checkpoint(create_custom_forward(self.str2str, top_k=0), msa, pair, R_in, T_in, xyz, state, idx, motif_mask, cyclic_reses)
         else:
-            with torch.profiler.record_function("track.msa_update"):
+            with torch.profiler.record_function("track.msa_update"), nvtx_range("track.msa_update"):
                 msa = self.msa2msa(msa, pair, rbf_feat, state)
-            with torch.profiler.record_function("track.pair_update"):
+            with torch.profiler.record_function("track.pair_update"), nvtx_range("track.pair_update"):
                 pair = self.msa2pair(msa, pair)
                 pair = self.pair2pair(pair, rbf_feat)
-            with torch.profiler.record_function("track.structure_update"):
+            with torch.profiler.record_function("track.structure_update"), nvtx_range("track.structure_update"):
                 R, T, state, alpha = self.str2str(msa, pair, R_in, T_in, xyz, state, idx, motif_mask=motif_mask, cyclic_reses=cyclic_reses, top_k=0) 
         
         return msa, pair, R, T, state, alpha
@@ -409,7 +410,7 @@ class IterativeSimulator(nn.Module):
            motif_mask: bool tensor, True if motif position that is frozen, else False(L,) 
         """
 
-        with torch.profiler.record_function("track.simulator.forward"):
+        with torch.profiler.record_function("track.simulator.forward"), nvtx_range("track.simulator.forward"):
             B, L = pair.shape[:2]
 
             if motif_mask is None:
@@ -424,67 +425,70 @@ class IterativeSimulator(nn.Module):
             R_s = list()
             T_s = list()
             alpha_s = list()
-            with torch.profiler.record_function("track.extra_blocks"):
+            with torch.profiler.record_function("track.extra_blocks"), nvtx_range("track.extra_blocks"):
                 for i_m in range(self.n_extra_block):
-                    R_in = R_in.detach() # detach rotation (for stability)
-                    T_in = T_in.detach()
-                    # Get current BB structure
-                    xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
+                    with nvtx_range(f"track.extra_block.{i_m}"):
+                        R_in = R_in.detach() # detach rotation (for stability)
+                        T_in = T_in.detach()
+                        # Get current BB structure
+                        xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
 
-                    msa_full, pair, R_in, T_in, state, alpha = self.extra_block[i_m](msa_full, 
-                                                                                     pair,
-                                                                                     R_in, 
-                                                                                     T_in, 
-                                                                                     xyz, 
-                                                                                     state, 
-                                                                                     idx,
-                                                                                     motif_mask=motif_mask,
-                                                                                     use_checkpoint=use_checkpoint,
-                                                                                     cyclic_reses=cyclic_reses)
-                    R_s.append(R_in)
-                    T_s.append(T_in)
-                    alpha_s.append(alpha)
+                        msa_full, pair, R_in, T_in, state, alpha = self.extra_block[i_m](msa_full, 
+                                                                                         pair,
+                                                                                         R_in, 
+                                                                                         T_in, 
+                                                                                         xyz, 
+                                                                                         state, 
+                                                                                         idx,
+                                                                                         motif_mask=motif_mask,
+                                                                                         use_checkpoint=use_checkpoint,
+                                                                                         cyclic_reses=cyclic_reses)
+                        R_s.append(R_in)
+                        T_s.append(T_in)
+                        alpha_s.append(alpha)
 
-            with torch.profiler.record_function("track.main_blocks"):
+            with torch.profiler.record_function("track.main_blocks"), nvtx_range("track.main_blocks"):
                 for i_m in range(self.n_main_block):
-                    R_in = R_in.detach()
-                    T_in = T_in.detach()
-                    # Get current BB structure
-                    xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
-                    
-                    msa, pair, R_in, T_in, state, alpha = self.main_block[i_m](msa, 
-                                                                               pair,
-                                                                               R_in, 
-                                                                               T_in, 
-                                                                               xyz, 
-                                                                               state, 
-                                                                               idx,
-                                                                               motif_mask=motif_mask,
-                                                                               use_checkpoint=use_checkpoint,
-                                                                               cyclic_reses=cyclic_reses)
-                    R_s.append(R_in)
-                    T_s.append(T_in)
-                    alpha_s.append(alpha)
+                    with nvtx_range(f"track.main_block.{i_m}"):
+                        R_in = R_in.detach()
+                        T_in = T_in.detach()
+                        # Get current BB structure
+                        xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
+                        
+                        msa, pair, R_in, T_in, state, alpha = self.main_block[i_m](msa, 
+                                                                                   pair,
+                                                                                   R_in, 
+                                                                                   T_in, 
+                                                                                   xyz, 
+                                                                                   state, 
+                                                                                   idx,
+                                                                                   motif_mask=motif_mask,
+                                                                                   use_checkpoint=use_checkpoint,
+                                                                                   cyclic_reses=cyclic_reses)
+                        R_s.append(R_in)
+                        T_s.append(T_in)
+                        alpha_s.append(alpha)
            
             state = self.proj_state2(state)
-            with torch.profiler.record_function("track.refine_blocks"):
+            with torch.profiler.record_function("track.refine_blocks"), nvtx_range("track.refine_blocks"):
                 for i_m in range(self.n_ref_block):
-                    R_in = R_in.detach()
-                    T_in = T_in.detach()
-                    xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
-                    R_in, T_in, state, alpha = self.str_refiner(msa, 
-                                                                pair, 
-                                                                R_in, 
-                                                                T_in, 
-                                                                xyz, 
-                                                                state, 
-                                                                idx, 
-                                                                top_k=64, 
-                                                                motif_mask=motif_mask,
-                                                                cyclic_reses=cyclic_reses)
-                    R_s.append(R_in)
-                    T_s.append(T_in)
-                    alpha_s.append(alpha)
+                    with nvtx_range(f"track.refine_block.{i_m}"):
+                        R_in = R_in.detach()
+                        T_in = T_in.detach()
+                        xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
+                        R_in, T_in, state, alpha = self.str_refiner(msa, 
+                                                                    pair, 
+                                                                    R_in, 
+                                                                    T_in, 
+                                                                    xyz, 
+                                                                    state, 
+                                                                    idx, 
+                                                                    top_k=64, 
+                                                                    motif_mask=motif_mask,
+                                                                    cyclic_reses=cyclic_reses)
+                        R_s.append(R_in)
+                        T_s.append(T_in)
+                        alpha_s.append(alpha)
 
             R_s = torch.stack(R_s, dim=0)
             T_s = torch.stack(T_s, dim=0)
