@@ -70,6 +70,15 @@ python scripts/run_inference_profile.py \
   profiler.enabled=true
 ```
 
+nsys profile
+```bash
+nsys profile python scripts/run_inference_profile.py \
+  'contigmap.contigs=[200-200]' \
+  inference.output_prefix=outputs/profile_large/test \
+  inference.num_designs=1 \
+  profiler.enabled=false
+```
+
 Extra large
 
 ```bash
