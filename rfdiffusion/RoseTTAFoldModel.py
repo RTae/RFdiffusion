@@ -3,6 +3,7 @@ import torch.nn as nn
 from rfdiffusion.Embeddings import MSA_emb, Extra_emb, Templ_emb, Recycling
 from rfdiffusion.Track_module import IterativeSimulator
 from rfdiffusion.AuxiliaryPredictor import DistanceNetwork, MaskedTokenNetwork, ExpResolvedNetwork, LDDTNetwork
+from rfdiffusion.profiling import nvtx_range
 from opt_einsum import contract as einsum
 
 class RoseTTAFoldModule(nn.Module):
@@ -71,13 +72,13 @@ class RoseTTAFoldModule(nn.Module):
                 return_raw=False, return_full=False, return_infer=False,
                 use_checkpoint=False, motif_mask=None, i_cycle=None, n_cycle=None,
                 cyclic_reses=None):
-        with torch.profiler.record_function("model.forward"):
+        with torch.profiler.record_function("model.forward"), nvtx_range("model.forward"):
             B, N, L = msa_latent.shape[:3]
-            with torch.profiler.record_function("model.embedding"):
+            with torch.profiler.record_function("model.embedding"), nvtx_range("model.embedding"):
                 msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, cyclic_reses)
                 msa_full = self.full_emb(msa_full, seq, idx)
 
-            with torch.profiler.record_function("model.recycling"):
+            with torch.profiler.record_function("model.recycling"), nvtx_range("model.recycling"):
                 if msa_prev == None:
                     msa_prev = torch.zeros_like(msa_latent[:,0])
                     pair_prev = torch.zeros_like(pair)
@@ -95,12 +96,12 @@ class RoseTTAFoldModule(nn.Module):
                 t1d = torch.cat([t1d, time_emb[None,None,...].repeat(1,n_tmpl,1,1)], dim=-1)
 
             # add template embedding
-            with torch.profiler.record_function("model.template_embedding"):
+            with torch.profiler.record_function("model.template_embedding"), nvtx_range("model.template_embedding"):
                 pair, state = self.templ_emb(
                     t1d, t2d, alpha_t, xyz_t, pair, state, use_checkpoint=use_checkpoint
                 )
 
-            with torch.profiler.record_function("model.simulator"):
+            with torch.profiler.record_function("model.simulator"), nvtx_range("model.simulator"):
                 is_frozen_residue = motif_mask if self.freeze_track_motif else torch.zeros_like(motif_mask).bool()
                 msa, pair, R, T, alpha_s, state = self.simulator(seq, msa_latent, msa_full, pair, xyz[:,:,:3],
                                                                  state, idx, use_checkpoint=use_checkpoint,
@@ -108,10 +109,11 @@ class RoseTTAFoldModule(nn.Module):
 
             if return_raw:
                 # get last structure
-                xyz = einsum('bnij,bnaj->bnai', R[-1], xyz[:,:,:3]-xyz[:,:,1].unsqueeze(-2)) + T[-1].unsqueeze(-2)
+                with nvtx_range("model.return_raw"):
+                    xyz = einsum('bnij,bnaj->bnai', R[-1], xyz[:,:,:3]-xyz[:,:,1].unsqueeze(-2)) + T[-1].unsqueeze(-2)
                 return msa[:,0], pair, xyz, state, alpha_s[-1]
 
-            with torch.profiler.record_function("model.output_heads"):
+            with torch.profiler.record_function("model.output_heads"), nvtx_range("model.output_heads"):
                 # predict masked amino acids
                 logits_aa = self.aa_pred(msa)
                 
@@ -120,7 +122,8 @@ class RoseTTAFoldModule(nn.Module):
 
                 if return_infer:
                     # get last structure
-                    xyz = einsum('bnij,bnaj->bnai', R[-1], xyz[:,:,:3]-xyz[:,:,1].unsqueeze(-2)) + T[-1].unsqueeze(-2)
+                    with nvtx_range("model.return_infer"):
+                        xyz = einsum('bnij,bnaj->bnai', R[-1], xyz[:,:,:3]-xyz[:,:,1].unsqueeze(-2)) + T[-1].unsqueeze(-2)
                     
                     # get scalar plddt
                     nbin = lddt.shape[1]

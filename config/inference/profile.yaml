@@ -5,6 +5,8 @@ profiler:
   enabled: true
   start_step: 1
   end_step: 5
+  max_steps: 0
+  nvtx_enabled: true
   record_shapes: true
   profile_memory: true
   with_stack: false

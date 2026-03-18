@@ -12,6 +12,7 @@ from rfdiffusion.potentials.manager import PotentialManager
 import logging
 import torch.nn.functional as nn
 from rfdiffusion import util
+from rfdiffusion.profiling import nvtx_range
 from hydra.core.hydra_config import HydraConfig
 import os
 import string
@@ -593,7 +594,7 @@ class Sampler:
         binderlen = self.binderlen
         target_res = self.ppi_conf.hotspot_res
 
-        with torch.profiler.record_function("preprocess.msa_features"):
+        with torch.profiler.record_function("preprocess.msa_features"), nvtx_range("preprocess.msa_features"):
             ##################
             ### msa_masked ###
             ##################
@@ -626,7 +627,7 @@ class Sampler:
 
             t1d[:, :, :, :21] = seqt1d[None, None, :, :21]
 
-        with torch.profiler.record_function("preprocess.t1d_xyz"):
+        with torch.profiler.record_function("preprocess.t1d_xyz"), nvtx_range("preprocess.t1d_xyz"):
             # Set timestep feature to 1 where diffusion mask is True, else 1-t/T
             timefeature = torch.zeros((L)).float()
             timefeature[self.mask_str.squeeze()] = 1
@@ -648,7 +649,7 @@ class Sampler:
                 (xyz_t, torch.full((1, 1, L, 13, 3), float("nan"))), dim=3
             )
 
-        with torch.profiler.record_function("preprocess.t2d_torsion"):
+        with torch.profiler.record_function("preprocess.t2d_torsion"), nvtx_range("preprocess.t2d_torsion"):
             ###########
             ### t2d ###
             ###########
@@ -676,7 +677,7 @@ class Sampler:
             alpha_mask = alpha_mask.reshape(1, -1, L, 10, 1)
             alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(1, -1, L, 30)
 
-        with torch.profiler.record_function("preprocess.to_device"):
+        with torch.profiler.record_function("preprocess.to_device"), nvtx_range("preprocess.to_device"):
             # put tensors on device
             msa_masked = msa_masked.to(self.device)
             msa_full = msa_full.to(self.device)
@@ -744,7 +745,7 @@ class Sampler:
             tors_t_1: (L, ?) The updated torsion angles of the next  step.
             plddt: (L, 1) Predicted lDDT of x0.
         """
-        with torch.profiler.record_function("sample_step.preprocess"):
+        with torch.profiler.record_function("sample_step.preprocess"), nvtx_range("sample_step.preprocess"):
             msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = (
                 self._preprocess(seq_init, x_t, t)
             )
@@ -752,7 +753,7 @@ class Sampler:
         N, L = msa_masked.shape[:2]
 
         if self.symmetry is not None:
-            with torch.profiler.record_function("sample_step.symmetry_idx_process"):
+            with torch.profiler.record_function("sample_step.symmetry_idx_process"), nvtx_range("sample_step.symmetry_idx_process"):
                 idx_pdb, self.chain_idx = self.symmetry.res_idx_procesing(
                     res_idx=idx_pdb
                 )
@@ -762,7 +763,7 @@ class Sampler:
         state_prev = None
 
         with torch.no_grad():
-            with torch.profiler.record_function("sample_step.model_forward"):
+            with torch.profiler.record_function("sample_step.model_forward"), nvtx_range("sample_step.model_forward"):
                 msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
                     msa_masked,
                     msa_full,
@@ -782,7 +783,7 @@ class Sampler:
                 )
 
         # prediction of X0
-        with torch.profiler.record_function("sample_step.allatom"):
+        with torch.profiler.record_function("sample_step.allatom"), nvtx_range("sample_step.allatom"):
             _, px0 = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
             px0 = px0.squeeze()[:, :14]
 
@@ -792,7 +793,7 @@ class Sampler:
 
         if t > final_step:
             seq_t_1 = nn.one_hot(seq_init, num_classes=22).to(self.device)
-            with torch.profiler.record_function("sample_step.denoiser_next_pose"):
+            with torch.profiler.record_function("sample_step.denoiser_next_pose"), nvtx_range("sample_step.denoiser_next_pose"):
                 x_t_1, px0 = self.denoiser.get_next_pose(
                     xt=x_t,
                     px0=px0,
@@ -801,13 +802,13 @@ class Sampler:
                     align_motif=self.inf_conf.align_motif,
                 )
         else:
-            with torch.profiler.record_function("sample_step.finalize_last_step"):
+            with torch.profiler.record_function("sample_step.finalize_last_step"), nvtx_range("sample_step.finalize_last_step"):
                 x_t_1 = torch.clone(px0).to(x_t.device)
                 seq_t_1 = torch.clone(seq_init)
                 px0 = px0.to(x_t.device)
 
         if self.symmetry is not None:
-            with torch.profiler.record_function("sample_step.apply_symmetry"):
+            with torch.profiler.record_function("sample_step.apply_symmetry"), nvtx_range("sample_step.apply_symmetry"):
                 x_t_1, seq_t_1 = self.symmetry.apply_symmetry(x_t_1, seq_t_1)
 
         return px0, x_t_1, seq_t_1, plddt
@@ -834,7 +835,7 @@ class SelfConditioning(Sampler):
             plddt: (L, 1) Predicted lDDT of x0.
         """
 
-        with torch.profiler.record_function("sample_step.preprocess"):
+        with torch.profiler.record_function("sample_step.preprocess"), nvtx_range("sample_step.preprocess"):
             msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = (
                 self._preprocess(seq_init, x_t, t)
             )
@@ -856,7 +857,7 @@ class SelfConditioning(Sampler):
         t2d[..., :44] = t2d_44
 
         if self.symmetry is not None:
-            with torch.profiler.record_function("sample_step.symmetry_idx_process"):
+            with torch.profiler.record_function("sample_step.symmetry_idx_process"), nvtx_range("sample_step.symmetry_idx_process"):
                 idx_pdb, self.chain_idx = self.symmetry.res_idx_procesing(
                     res_idx=idx_pdb
                 )
@@ -865,7 +866,7 @@ class SelfConditioning(Sampler):
         ### Forward Pass ###
         ####################
         with torch.no_grad():
-            with torch.profiler.record_function("sample_step.model_forward"):
+            with torch.profiler.record_function("sample_step.model_forward"), nvtx_range("sample_step.model_forward"):
                 msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
                     msa_masked,
                     msa_full,
@@ -893,7 +894,7 @@ class SelfConditioning(Sampler):
         self.prev_pred = torch.clone(px0)
 
         # prediction of X0
-        with torch.profiler.record_function("sample_step.allatom"):
+        with torch.profiler.record_function("sample_step.allatom"), nvtx_range("sample_step.allatom"):
             _, px0 = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
             px0 = px0.squeeze()[:, :14]
 
@@ -903,7 +904,7 @@ class SelfConditioning(Sampler):
 
         seq_t_1 = torch.clone(seq_init)
         if t > final_step:
-            with torch.profiler.record_function("sample_step.denoiser_next_pose"):
+            with torch.profiler.record_function("sample_step.denoiser_next_pose"), nvtx_range("sample_step.denoiser_next_pose"):
                 x_t_1, px0 = self.denoiser.get_next_pose(
                     xt=x_t,
                     px0=px0,
@@ -916,7 +917,7 @@ class SelfConditioning(Sampler):
                 f"Timestep {t}, input to next step: { seq2chars(torch.argmax(seq_t_1, dim=-1).tolist())}"
             )
         else:
-            with torch.profiler.record_function("sample_step.finalize_last_step"):
+            with torch.profiler.record_function("sample_step.finalize_last_step"), nvtx_range("sample_step.finalize_last_step"):
                 x_t_1 = torch.clone(px0).to(x_t.device)
                 px0 = px0.to(x_t.device)
 
@@ -925,7 +926,7 @@ class SelfConditioning(Sampler):
         ######################
 
         if self.symmetry is not None:
-            with torch.profiler.record_function("sample_step.apply_symmetry"):
+            with torch.profiler.record_function("sample_step.apply_symmetry"), nvtx_range("sample_step.apply_symmetry"):
                 x_t_1, seq_t_1 = self.symmetry.apply_symmetry(x_t_1, seq_t_1)
 
         return px0, x_t_1, seq_t_1, plddt

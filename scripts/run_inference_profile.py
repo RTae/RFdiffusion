@@ -17,6 +17,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 
 from rfdiffusion.inference import utils as iu
+from rfdiffusion.profiling import nvtx_range
 from rfdiffusion.util import writepdb, writepdb_multi
 
 
@@ -74,6 +75,8 @@ def get_profiler_cfg(conf: Any) -> dict[str, Any]:
       profiler.record_shapes=true
       profiler.profile_memory=true
       profiler.with_stack=false
+            profiler.max_steps=0
+            profiler.nvtx_enabled=true
     """
     defaults = {
         "enabled": True,
@@ -84,6 +87,8 @@ def get_profiler_cfg(conf: Any) -> dict[str, Any]:
         "with_stack": False,
         "with_flops": False,
         "row_limit": 30,
+        "max_steps": 0,          # 0 => run all diffusion steps
+        "nvtx_enabled": True,    # NVTX markers for Nsight Systems
     }
 
     try:
@@ -166,7 +171,9 @@ def main(conf: HydraConfig) -> None:
         cuda_sync_if_available()
         design_t0 = time.perf_counter()
 
-        x_init, seq_init = sampler.sample_init()
+        nvtx_enabled = bool(profiler_cfg["nvtx_enabled"])
+        with nvtx_range("sampler.sample_init", enabled=nvtx_enabled):
+            x_init, seq_init = sampler.sample_init()
 
         denoised_xyz_stack = []
         px0_xyz_stack = []
@@ -180,11 +187,24 @@ def main(conf: HydraConfig) -> None:
         step_times_ms: list[float] = []
 
         t_values = list(range(int(sampler.t_step_input), sampler.inf_conf.final_step - 1, -1))
+        max_steps = int(profiler_cfg["max_steps"])
+        if max_steps > 0:
+            t_values = t_values[:max_steps]
         num_steps = len(t_values)
+        if num_steps == 0:
+            raise ValueError(
+                "No diffusion steps selected. Set profiler.max_steps=0 "
+                "or a positive value."
+            )
 
-        start_step = int(profiler_cfg["start_step"])
-        end_step = int(profiler_cfg["end_step"])
+        start_step = max(0, int(profiler_cfg["start_step"]))
+        end_step = min(int(profiler_cfg["end_step"]), num_steps - 1)
         profile_enabled = bool(profiler_cfg["enabled"])
+
+        log.info(
+            f"[design {i_des}] num_steps={num_steps} max_steps={max_steps} "
+            f"profile_enabled={profile_enabled} nvtx_enabled={nvtx_enabled}"
+        )
 
         activities = [torch.profiler.ProfilerActivity.CPU]
         if torch.cuda.is_available():
@@ -203,65 +223,67 @@ def main(conf: HydraConfig) -> None:
         )
 
         with profiler_context as prof:
-            for step_idx, t in enumerate(t_values):
-                profiled = profile_enabled and (start_step <= step_idx <= end_step)
+            with nvtx_range("rfdiffusion.design_loop", enabled=nvtx_enabled):
+                for step_idx, t in enumerate(t_values):
+                    profiled = profile_enabled and (start_step <= step_idx <= end_step)
 
-                cuda_sync_if_available()
-                step_t0 = time.perf_counter()
+                    cuda_sync_if_available()
+                    step_t0 = time.perf_counter()
 
-                if profiled:
-                    with torch.profiler.record_function(f"rfdiffusion_step_{step_idx}_t_{t}"):
-                        with torch.profiler.record_function("sampler.sample_step"):
+                    with nvtx_range(f"rfdiffusion.step.{step_idx}.t_{t}", enabled=nvtx_enabled):
+                        if profiled:
+                            with torch.profiler.record_function(f"rfdiffusion_step_{step_idx}_t_{t}"):
+                                with torch.profiler.record_function("sampler.sample_step"):
+                                    px0, x_t, seq_t, plddt = sampler.sample_step(
+                                        t=t,
+                                        x_t=x_t,
+                                        seq_init=seq_t,
+                                        final_step=sampler.inf_conf.final_step,
+                                    )
+                        else:
                             px0, x_t, seq_t, plddt = sampler.sample_step(
                                 t=t,
                                 x_t=x_t,
                                 seq_init=seq_t,
                                 final_step=sampler.inf_conf.final_step,
                             )
-                else:
-                    px0, x_t, seq_t, plddt = sampler.sample_step(
-                        t=t,
-                        x_t=x_t,
-                        seq_init=seq_t,
-                        final_step=sampler.inf_conf.final_step,
+
+                    cuda_sync_if_available()
+                    step_t1 = time.perf_counter()
+
+                    if profile_enabled and profiled:
+                        prof.step()
+
+                    px0_xyz_stack.append(px0)
+                    denoised_xyz_stack.append(x_t)
+                    seq_stack.append(seq_t)
+                    plddt_stack.append(plddt[0])
+
+                    step_time_ms = (step_t1 - step_t0) * 1000.0
+                    step_times_ms.append(step_time_ms)
+                    mem_stats = get_mem_stats_mb()
+
+                    row = {
+                        "design_id": i_des,
+                        "step_idx": step_idx,
+                        "t": t,
+                        "profiled": int(profiled),
+                        "step_time_ms": round(step_time_ms, 4),
+                        "mem_alloc_mb": round(mem_stats["mem_alloc_mb"], 2),
+                        "mem_reserved_mb": round(mem_stats["mem_reserved_mb"], 2),
+                        "max_mem_alloc_mb": round(mem_stats["max_mem_alloc_mb"], 2),
+                        "max_mem_reserved_mb": round(mem_stats["max_mem_reserved_mb"], 2),
+                    }
+                    per_step_rows.append(row)
+                    append_csv_row(steps_csv, row, step_fields)
+
+                    log.info(
+                        f"[design {i_des}] step_idx={step_idx:03d} t={t:03d} "
+                        f"profiled={profiled} "
+                        f"step_time_ms={step_time_ms:.2f} "
+                        f"mem_alloc_mb={mem_stats['mem_alloc_mb']:.2f} "
+                        f"max_mem_alloc_mb={mem_stats['max_mem_alloc_mb']:.2f}"
                     )
-
-                cuda_sync_if_available()
-                step_t1 = time.perf_counter()
-
-                if profile_enabled and profiled:
-                    prof.step()
-
-                px0_xyz_stack.append(px0)
-                denoised_xyz_stack.append(x_t)
-                seq_stack.append(seq_t)
-                plddt_stack.append(plddt[0])
-
-                step_time_ms = (step_t1 - step_t0) * 1000.0
-                step_times_ms.append(step_time_ms)
-                mem_stats = get_mem_stats_mb()
-
-                row = {
-                    "design_id": i_des,
-                    "step_idx": step_idx,
-                    "t": t,
-                    "profiled": int(profiled),
-                    "step_time_ms": round(step_time_ms, 4),
-                    "mem_alloc_mb": round(mem_stats["mem_alloc_mb"], 2),
-                    "mem_reserved_mb": round(mem_stats["mem_reserved_mb"], 2),
-                    "max_mem_alloc_mb": round(mem_stats["max_mem_alloc_mb"], 2),
-                    "max_mem_reserved_mb": round(mem_stats["max_mem_reserved_mb"], 2),
-                }
-                per_step_rows.append(row)
-                append_csv_row(steps_csv, row, step_fields)
-
-                log.info(
-                    f"[design {i_des}] step_idx={step_idx:03d} t={t:03d} "
-                    f"profiled={profiled} "
-                    f"step_time_ms={step_time_ms:.2f} "
-                    f"mem_alloc_mb={mem_stats['mem_alloc_mb']:.2f} "
-                    f"max_mem_alloc_mb={mem_stats['max_mem_alloc_mb']:.2f}"
-                )
 
         # Export profiler outputs
         row_limit = int(profiler_cfg["row_limit"])
@@ -380,6 +402,8 @@ def main(conf: HydraConfig) -> None:
             "profile_enabled": profile_enabled,
             "profile_start_step": start_step,
             "profile_end_step": end_step,
+            "profile_max_steps": max_steps,
+            "nvtx_enabled": nvtx_enabled,
             "total_runtime_sec": round(total_runtime_sec, 4),
             "peak_gpu_alloc_mb": round(mem_stats["max_mem_alloc_mb"], 2),
             "peak_gpu_reserved_mb": round(mem_stats["max_mem_reserved_mb"], 2),

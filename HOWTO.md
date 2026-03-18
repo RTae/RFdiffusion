@@ -14,6 +14,9 @@ How to run
 
 ```bash
 docker run --gpus all -it \
+--cap-add=SYS_ADMIN \
+--cap-add=SYS_PTRACE \
+--security-opt seccomp=unconfined \
 -e PYTHONPATH=/workspace/RFdiffusion \
 -v "$PWD":/workspace/RFdiffusion \
 -w /workspace/RFdiffusion \
@@ -72,11 +75,13 @@ python scripts/run_inference_profile.py \
 
 nsys profile
 ```bash
-nsys profile python scripts/run_inference_profile.py \
+nsys profile --trace=cuda,nvtx,osrt python scripts/run_inference_profile.py \
   'contigmap.contigs=[200-200]' \
   inference.output_prefix=outputs/profile_large/test \
   inference.num_designs=1 \
-  profiler.enabled=false
+  profiler.enabled=false \
+  profiler.nvtx_enabled=true \
+  profiler.max_steps=12
 ```
 
 Extra large
