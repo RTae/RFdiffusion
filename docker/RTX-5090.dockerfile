@@ -155,10 +155,12 @@ RUN apt-get -q update && \
     wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get -q update && \
-    apt-get -y install cuda-compat-12-8 && \
+    apt-get -y install cuda-compat-12-8 cuda-nsight-systems-12-8 cuda-nsight-compute-12-8 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     rm cuda-keyring_1.1-1_all.deb
+
+ENV PATH="/usr/local/cuda-12.8/bin:${PATH}"
 
 #-----------------------------------------------------------------------
 # 2. Copy Environment (code mounted at runtime)
